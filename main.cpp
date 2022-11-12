@@ -1,4 +1,4 @@
-// The following code 
+
 // The source code is based on Jerome's code available here
 // https://github.com/jp112sdl/Beispiel_AskSinPP/tree/master/examples/HM-ES-TX-WM_CCU
 //
