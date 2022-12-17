@@ -1,19 +1,87 @@
+//
+// INTRO
+//
+// The following code is a variant of the software for a Homematic HM-ES-TX-WM_CCU variant 
+// based on AskSinPP [1]. The device supports GAS ONLY, e.g. energy related code has been removed.
 
-// The source code is based on Jerome's code available here
-// https://github.com/jp112sdl/Beispiel_AskSinPP/tree/master/examples/HM-ES-TX-WM_CCU
 //
-//
-// J. Opschroef
-// October 2022
-//
-// License Creative Commons - http://creativecommons.org/licenses/by-nc-sa/3.0/de/
+// DISPLAY
 // 
+// It supports an OLED SSD1306 display.
+// The display informs about:
+// 
+// E: GAS ENERGY COUNTER
+// P: GAS POWER
+
+//
+// MODIFICATIONS
+// 
+// GAS ENERGY COUNTER is a cumulative counter of gas in m3.
+// GAS POWER has been modified. It measures the amount of
+// gas in 3 minutes and converts it to m3/h.
+
+//
+// YOUR MODIFICATIONS
+// 
+// Set your own device serial number, search for "papa555555" below.
+
+
+// 
+// LIBS
+// 
+// The software makes use of the following libraries:
+// - greygnome/EnableInterrupt [2]
+// - pa-pa/AskSinPP [3]
+// - greiman/SSD1306Ascii [4]
+//
+// The library SSD1306Ascii has been chosen because the 
+// "Adafruit SSD1306" library is too big to be included.
+
+// 
+// Author: J. Opschroef, November 2022
+//
+// License: Creative Commons - http://creativecommons.org/licenses/by-nc-sa/3.0/de/
+
+// 
+// REFERENCES
+// 
+// [1] HM-ES-TX-WM_CCU  https://github.com/jp112sdl/Beispiel_AskSinPP/tree/master/examples/HM-ES-TX-WM_CCU
+// [2] EnableInterrupt https://github.com/GreyGnome/EnableInterrupt
+// [3] AskSinPP https://github.com/pa-pa/AskSinPP and https://asksinpp.de/
+// [4] SSD1306Ascii https://github.com/greiman/SSD1306Ascii
+
+//
+// ASSUMPTIONS
+//
+// (a) average gas consumption is 2000 m3 per year
+// (b) the gas meter counts 0.01 m3 / pulse
+//
+// The following calculations are averages
+// They are used to get an idea about the ranges
+// I use gas to heat water and for the radiators
+// Warm water is necessary the whole year,
+// while heating is only necessary in winter.
+// So the actual gas consumption is not constant
+// but lower at summer and higher at winter.
+//
+//  1 year     2000 m3   200 kilopulses
+//  5 years   10000 m3  1000 kilopulses
+// 10 years   20000 m3  2000 kilopulses
+//
+//  1 day      5.5 m3    550 pulses
+//  1 week    38.4 m3   3840 pulses
+//  1 month  166.7 m3  16670 pulses
+//
+//  1 hour  0.228 m3    23 pulses
+//
+// So roughly a pulse every 2 to 3 minutes
 
 
 
 
-// Display samples of fonts.
-
+//- -----------------------------------------------------------------------------------------------------------------------
+// SSD1306 Ascii library
+//- -----------------------------------------------------------------------------------------------------------------------
 
 #include "SSD1306Ascii.h"
 #include "SSD1306AsciiAvrI2c.h"
@@ -23,15 +91,28 @@
 
 // Define proper RST_PIN if required.
 #define RST_PIN -1
-
-int oled_consumptionSum = 0;
-int oled_actualConsumption = 0;
-int oled_counterSum = 0;
+uint32_t oled_counter = 0;
+uint32_t oled_counterSum = 0;
+uint32_t oled_consumptionSum = 0;
+float oled_consumptionSumFloat = 0;
+uint32_t oled_actualConsumption = 0;
+float oled_actualConsumptionFloat = 0;
+uint32_t oled_c = 0;
 uint16_t oled_sigs = 0;
-int oled_c = 0;
+float oled_sigsFloat = 0;
+
+float oled_gasEnergyCounter = 0;
+float oled_gasPower = 0;
+uint8_t oled_meterType = 0;
+uint8_t oled_contrast = 255;
 
 
 
+SSD1306AsciiAvrI2c oled;
+
+
+// define this to disable debug 
+#define NDEBUG 
 
 //- -----------------------------------------------------------------------------------------------------------------------
 // AskSin++
@@ -41,7 +122,6 @@ int oled_c = 0;
 
 // define this to read the device id, serial and device type from bootloader section
 // #define USE_OTA_BOOTLOADER
-
 
 #define EI_NOTEXTERNAL
 #include <EnableInterrupt.h>
@@ -62,7 +142,6 @@ int oled_c = 0;
 #define COUNTER1_PIN 14
 // we send the counter every 3 minutes
 #define MSG_CYCLE seconds2ticks(60 * 3)
-
 
 // number of available peers per channel
 #define PEERS_PER_CHANNEL 2
@@ -262,58 +341,6 @@ public:
   }
 };
 
-class PowerEventMsg : public Message {
-public:
-  void init(uint8_t msgcnt,bool boot,const uint64_t& counter,const uint32_t& power) {
-    uint8_t cnt1 = (counter >> 16) & 0x7f;
-    if( boot == true ) {
-      cnt1 |= 0x80;
-    }
-    Message::init(0x0f,msgcnt,0x5f,BIDI|WKMEUP,cnt1,(counter >> 8) & 0xff);
-    pload[0] = counter & 0xff;
-    pload[1] = (power >> 16) & 0xff;
-    pload[2] = (power >> 8) & 0xff;
-    pload[3] = power & 0xff;
-  }
-};
-
-class PowerEventCycleMsg : public PowerEventMsg {
-public:
-  void init(uint8_t msgcnt,bool boot,const uint64_t& counter,const uint32_t& power) {
-    PowerEventMsg::init(msgcnt,boot,counter,power);
-    typ = 0x5e;
-  }
-};
-
-class IECEventMsg : public Message {
-public:
-  void init(uint8_t msgcnt,uint8_t channel,const uint64_t& counter,const uint32_t& power,bool lowbat) {
-    uint8_t cnt1 = channel & 0x3f;
-    if( lowbat == true ) {
-      cnt1 |= 0x40;
-    }
-    Message::init(0x15,msgcnt,0x61,BIDI|WKMEUP,cnt1,0x00);
-    pload[0] = (counter >> 32) & 0xff;
-    pload[1] = (counter >> 24) & 0xff;
-    pload[2] = (counter >> 16) & 0xff;
-    pload[3] = (counter >>  8) & 0xff;
-    pload[4] = counter & 0xff;
-    pload[5] = 0x00; //
-    pload[6] = (power >> 24) & 0xff;
-    pload[7] = (power >> 16) & 0xff;
-    pload[8] = (power >>  8) & 0xff;
-    pload[9] = power & 0xff;
-  }
-};
-
-class IECEventCycleMsg : public IECEventMsg {
-public:
-  void init(uint8_t msgcnt,uint8_t channel,const uint64_t& counter,const uint32_t& power,bool lowbat) {
-    IECEventMsg::init(msgcnt,channel,counter,power,lowbat);
-    typ = 0x60;
-  }
-};
-
 class MeterChannel : public Channel<HalType,MeterList1,EmptyList,List4,PEERS_PER_CHANNEL,MeterList0>, public Alarm {
 
   const uint32_t    maxVal = 838860700;
@@ -357,11 +384,13 @@ public:
     tick = MSG_CYCLE;
     clock.add(*this);
 
+    
     uint32_t consumptionSum;
     uint32_t actualConsumption=0;
 
     MeterList1 l1 = getList1();
     uint8_t metertype = l1.meterType(); // cache metertype to reduce eeprom access
+    oled_meterType = metertype;
     if( metertype == 0 ) {
       return;
     }
@@ -374,46 +403,85 @@ public:
       counter = 0;
     }
     counterSum += c;
-    oled_counterSum = counterSum;
-    oled_c = c;
     
-    uint16_t sigs = 1;
-    switch( metertype ) {
-      case 1: sigs = l1.constantGas(); break;
-      case 2: sigs = l1.constantIR(); break;
-      case 4: sigs = l1.constantLed(); break;
-      default: break;
-    }
+    // Copy values for SSD1306 display
+    
+    DPRINTLN("");
+    oled_c = c;
+    DPRINT(F("c= "));
+    DPRINTLN(c);
+    
+    oled_counterSum = counterSum;
+    DPRINT(F("counterSum= "));
+    DPRINTLN((uint32_t)counterSum);
+    DPRINTLN("");
+
+    // Suport Gas only
+    uint16_t sigs = l1.constantGas();
 
     switch( metertype ) {
     case 1:
-    // Gas
       consumptionSum = counterSum * sigs;
-      actualConsumption = (c * sigs * 10) / (MSG_CYCLE / seconds2ticks(60));
+      // actualConsumption = (c * sigs * 10) / (MSG_CYCLE / seconds2ticks(60)); // This is the original calculation
+      actualConsumption = (c * sigs * 60) / (MSG_CYCLE / seconds2ticks(60));   // Changed to "20" to convert into m3/h
 
-      oled_sigs = sigs;
-      oled_consumptionSum = consumptionSum ;
-      oled_actualConsumption = actualConsumption ;
+      // Analysis of actualConsumption
+      // Assuming every count event represents 0.01 m3. (sigs = 10)
+      // Assuming a count event happens every 3 minutes. (c=1)
+      // That means that the 20 * 0.01 m3 = 0.02 m3/hhas been consumed.
+      
+      // actualConsumption is calculated every 3 minutes
+      // actualConsumption = (c * sigs * 60) / (MSG_CYCLE / seconds2ticks(60));
+      // actualConsumption = (c * 10 * 60) / (18000 / 6000); 
+      // actualConsumption = (1 * 600) / 3;
+      // actualConsumption = 200;
 
+      // What will Homematic Display ?
+      // Homematic divides the value by 1000 to display "Verbrauch"
+      // Verbrauch = 200 / 1000
+      // Verbrauch = 0.2
+      // I don't know why m3 is displayed instead of m3 / time interval
+
+            
       // TODO handle overflow
+      
+      // Copy values for SSD1306 display
+      DPRINTLN("");
+      DPRINT(F("metertype= "));
+      DPRINTLN(metertype);
+ 
+      oled_consumptionSum = consumptionSum;
+      DPRINT(F("consumptionSum= "));
+      DPRINTLN(consumptionSum);
+ 
+      oled_counterSum = counterSum;
+      DPRINT(F("counterSum= "));
+      DPRINTLN((uint32_t)counterSum);
+           
+      oled_sigs = sigs;
+      DPRINT(F("sigs= "));
+      DPRINTLN(sigs);
+
+      oled_actualConsumption = actualConsumption;
+      DPRINT(F("ActualConsumption= "));
+      DPRINTLN(actualConsumption);
+      DPRINTLN("");     
+      
+      
+      
       
       ((GasPowerEventCycleMsg&)msg).init(msgcnt++,boot,consumptionSum,actualConsumption);
       break;
-    case 2: 
-    case 4: 
-      // calculate sum
-      consumptionSum = (10000 * counterSum / sigs);
-      // TODO handle overflow
-      
-      // calculate consumption whithin the last MSG_CYCLE period
-      actualConsumption = (60 * 100000 * c) / (sigs * (MSG_CYCLE / seconds2ticks(60)));
-      ((PowerEventCycleMsg&)msg).init(msgcnt++,boot,consumptionSum,actualConsumption);
-      break;
+
+    /*
     case 8:
+    
       ((IECEventCycleMsg&)msg).init(msgcnt++,number(),counterSum,actualConsumption,device().battery().low());
+
       break;
+      */
     default:
-      DPRINTLN("Unknown meter type");
+      DPRINTLN(F("Unknown meter type"));
       return;
       break;
     }
@@ -483,36 +551,177 @@ void counter1ISR () {
   }
 }
 
-
 ConfigButton<MeterType> cfgBtn(sdev);
 
+class CycleInfoAlarm : public Alarm {
+public:
+CycleInfoAlarm () : Alarm (0) {}
+virtual ~CycleInfoAlarm () {}
+  void trigger (AlarmClock& clock)  {
+   set(seconds2ticks(60UL*60));
+   clock.add(*this);
+   sdev.channel(1).changed(true);
+  }
+} cycle;
 
-SSD1306AsciiAvrI2c oled;
 
+// 
+// Update the SSD1306 Oled display
+// 
+void display_update(){
+  
+  String display_data_str = "";
+  oled.setCursor(0,0);
+  
+
+  // E: GAS ENERGY COUNTER
+  // derived from consumptionSum divided by 1000
+  //
+  // Template "E xxxxxx.xx m3  "
+  // We can print 6 number plus "." plus two positions after decimal point - total 9
+  
+
+  oled.print(F("E "));
+  
+  oled_consumptionSumFloat = oled_consumptionSum;
+  oled_gasEnergyCounter = oled_consumptionSumFloat/1000.0;
+
+  display_data_str = String(oled_gasEnergyCounter);
+  
+  if (display_data_str.length() <= 9) { 
+    // Number can be displayed
+    
+    for (int i=0; i<9-display_data_str.length(); i++ )
+      oled.print(F(" "));  
+    
+    oled.print(display_data_str);
+    oled.println(F(" m3"));
+  } else {
+    oled.println (F("Ueberlauf m3"));
+  }
+  
+
+  
+  // P:GAS POWER
+  // derived from "actualConsumption" [m3/ 3 min]
+  // "actualConsumption" is transferred to Homematic
+  // The value on the OLED display is converted to 
+  // gasPower in [m3/h]
+  // 
+  // Template "P xxxxxx.xx m3/h"
+
+  oled.print(F("P "));
+
+  oled_actualConsumptionFloat = oled_actualConsumption;
+  oled_gasPower = oled_actualConsumptionFloat/1000.0; 
+
+  display_data_str = String(oled_gasPower);
+  if (display_data_str.length() <= 9) { 
+    // Number can be displayed
+    for (int i=0; i<9-display_data_str.length(); i++ )
+      oled.print(F(" "));  
+    oled.print(display_data_str);
+    oled.println(F(" m3/h"));
+
+  } else {
+     oled.println (F("Ueberlauf m3/h"));
+  }
+
+  
+  // I: number of count events / message cycle ("Impulse)
+  // derived from oled_c
+  //
+  // Template  "I xxxxxx    Imp "
+
+  oled.print("I ");  
+  display_data_str = String(oled_c); // max 6 digits
+
+  if (display_data_str.length() <= 6) { 
+    // Number can be displayed
+    for (int i=0; i<6-display_data_str.length(); i++ )
+      oled.print(F(" "));  
+    oled.print(display_data_str);
+    oled.println(F("    Imp "));
+
+  } else {
+     oled.println (F("Ueberlauf Imp "));
+  }
+
+
+
+// C: Configuration of Gas consumption per count event
+// Configuration is done in Homematic WebUI
+// 
+// First check, if correct meterType is selected.
+// We allow "Gas" and "Unknown", only.
+// oled_metertype =   0 -> default
+// oled_metertype =   1 -> Gas
+// oled_metertype =   2 -> IR
+// oled_metertype =   4 -> LED
+// oled_metertype = 255 -> Unbekannt
+// 
+// Template "C xxxxxx.xx m3/I"
+
+oled_sigsFloat = oled_sigs/1000.0;
+  
+oled.print(F("C "));
+
+if( ((1==oled_meterType) ||  (0==oled_meterType)) ){  // Gas or "Unknown"
+  // Print the configuration
+  display_data_str = String(oled_sigsFloat);
+  
+  if (display_data_str.length() <= 9) { 
+    // Number can be displayed
+    
+    for (int i=0; i<9-display_data_str.length(); i++ )
+      oled.print(F(" "));  
+    
+    oled.print(display_data_str);
+    oled.println(F(" m3/I"));
+  } else {
+    oled.println (F("Ueberlauf m3/I"));
+  }
+  
+
+} else {
+  // Config error
+  
+  oled.println("Konfig Fehler ");
+}
+
+}
+
+
+void display_init(){
+  #if RST_PIN >= 0
+    oled.begin(&Adafruit128x64, I2C_ADDRESS, RST_PIN);
+  #else // RST_PIN >= 0
+    oled.begin(&Adafruit128x64, I2C_ADDRESS);
+  #endif // RST_PIN >= 0
+    // Call oled.setI2cClock(frequency) to change from the default frequency.
+
+  oled.setFont(ZevvPeep8x16);
+  /* Not necessary 
+  oled.println(F("E xxxxxx.xx m3  "));
+  oled.println(F("P xxxxxx.xx m3/h"));
+  oled.println(F("I xxxxxx    Imp "));
+  oled.println(F("C xxxxxx.xx m3/I"));
+  */
+
+}
+
+  
 
 void setup () {
-  // Display part
 
-#if RST_PIN >= 0
-  oled.begin(&Adafruit128x64, I2C_ADDRESS, RST_PIN);
-#else // RST_PIN >= 0
-  oled.begin(&Adafruit128x64, I2C_ADDRESS);
-#endif // RST_PIN >= 0
-  // Call oled.setI2cClock(frequency) to change from the default frequency.
-
-  
-  //oled.setFont(X11fixed7x14B);  // ok
-  // oled.setFont(lcdnums14x24); // nice numbers, but numbers only
-  // oled.setFont(Roosewood22); // ugly
-  oled.setFont(ZevvPeep8x16); // Gut
-  
-  
-
-
-
-  // asksinpp part
+  // 
+  // AskSinPP 
+  //
   DINIT(57600,ASKSIN_PLUS_PLUS_IDENTIFIER);
   sdev.init(hal);
+
+
+
 
   buttonISR(cfgBtn,CONFIG_BUTTON_PIN);
 
@@ -526,33 +735,41 @@ void setup () {
   // add channel 1 to timer to send event
   sysclock.add(sdev.channel(1));
   sdev.initDone();
-}
+  sysclock.add(cycle);
+
+  //
+  // SSD1306 Ascii library
+  //
+  display_init();
+  
+  // 
+  // Print internal data to understand the code  :-)
+  //
+  DPRINT(F("seconds2ticks(60)= "));
+  DPRINTLN(seconds2ticks(60));
+  
+  // MSG_CYCLE. The value is 3min * 100 = 180 * 100 = 18000
+  DPRINT(F("MSG_CYCLE= "));
+  DPRINTLN(MSG_CYCLE);
+
+  // sigs: Gas constant, configured via Homematic Web GUI, "Gas-Zählerkonstante" [m3/ Impuls]
+  DPRINT(F("Gas-Zählerkonstante (sigs)= "));
+  DPRINTLN(oled_sigs);
+ 
+  DPRINTLN("");
+  }
 
 
 void loop() {
+  // AsksinPP 
   bool worked = hal.runready();
   bool poll = sdev.pollRadio();
-
-  
-  oled.clear();
-  oled.print("E m3: "); // GAS ENERGY COUNTER
-  oled.println(oled_consumptionSum);
-  oled.print("P m3: ");  // GAS POWER
-  oled.println(oled_actualConsumption);
-  oled.print("C: ");
-  oled.println(oled_c);
-  //oled.println(oled_counterSum);
-
-  oled.print("S: ");
-  oled.println(oled_sigs);
-
-
 
   if( worked == false && poll == false ) {
     hal.activity.savePower<Sleep<> >(hal);
   }
+
+  // SSD1306 Ascii library
+  display_update();
+
 }
-
-
-
-
